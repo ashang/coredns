@@ -1,72 +1,74 @@
-BUILD_VERBOSE := -v
+# Makefile for building CoreDNS
+GITCOMMIT:=$(shell git describe --dirty --always)
+BINARY:=coredns
+SYSTEM:=
+CHECKS:=check
+BUILDOPTS:=-v
+GOPATH?=$(HOME)/go
+MAKEPWD:=$(dir $(realpath $(firstword $(MAKEFILE_LIST))))
+CGO_ENABLED:=0
 
-TEST_VERBOSE := -v
-
-DOCKER_IMAGE_NAME ?= $$USER/coredns
-DOCKER_VERSION ?= $(shell grep 'coreVersion' coremain/version.go | awk '{ print $$3 }' | tr -d '"')
-
+.PHONY: all
 all: coredns
 
-# Phony this to ensure we always build the binary.
-# TODO: Add .go file dependencies.
 .PHONY: coredns
-coredns: deps core/zmiddleware.go core/dnsserver/zdirectives.go
-	go build $(BUILD_VERBOSE) -ldflags="-s -w"
+coredns: $(CHECKS)
+	CGO_ENABLED=$(CGO_ENABLED) $(SYSTEM) go build $(BUILDOPTS) -ldflags="-s -w -X github.com/coredns/coredns/coremain.GitCommit=$(GITCOMMIT)" -o $(BINARY)
 
-.PHONY: docker
-docker: deps
-	CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w"
-	docker build -t $(DOCKER_IMAGE_NAME) .
-	docker tag $(DOCKER_IMAGE_NAME):latest $(DOCKER_IMAGE_NAME):$(DOCKER_VERSION)
+.PHONY: check
+check: core/plugin/zplugin.go core/dnsserver/zdirectives.go
 
-.PHONY: deps
-deps: fmt
-	go get ${BUILD_VERBOSE}
-
-.PHONY: test
-test: deps
-	go test -race $(TEST_VERBOSE) ./test ./middleware/...
-
-.PHONY: testk8s
-testk8s: deps
-	go test -race $(TEST_VERBOSE) -tags=k8s -run 'TestKubernetes' ./test ./middleware/kubernetes/...
-
-.PHONY: coverage
-coverage: deps
-	set -e -x
-	echo "" > coverage.txt
+.PHONY: travis
+travis:
+ifeq ($(TEST_TYPE),core)
+	( cd request; go test -race ./... )
+	( cd core; go test -race  ./... )
+	( cd coremain; go test -race ./... )
+endif
+ifeq ($(TEST_TYPE),integration)
+	( cd test; go test -race ./... )
+endif
+ifeq ($(TEST_TYPE),plugin)
+	( cd plugin; go test -race ./... )
+endif
+ifeq ($(TEST_TYPE),coverage)
 	for d in `go list ./... | grep -v vendor`; do \
-		go test $(TEST_VERBOSE)  -tags 'etcd k8s' -race -coverprofile=cover.out -covermode=atomic -bench=. $$d || exit 1; \
+		t=$$(date +%s); \
+		go test -i -coverprofile=cover.out -covermode=atomic $$d || exit 1; \
+		go test -coverprofile=cover.out -covermode=atomic $$d || exit 1; \
 		if [ -f cover.out ]; then \
-			cat cover.out >> coverage.txt; \
-			rm cover.out; \
+			cat cover.out >> coverage.txt && rm cover.out; \
 		fi; \
 	done
+endif
+ifeq ($(TEST_TYPE),fuzzit)
+	# skip fuzzing for PR
+	if [ "$(TRAVIS_PULL_REQUEST)" = "false" ] || [ "$(FUZZIT_TYPE)" = "local-regression" ] ; then \
+		export GO111MODULE=off; \
+		go get -u github.com/dvyukov/go-fuzz/go-fuzz-build; \
+		go get -u -v .; \
+		cd ../../go-acme/lego && git checkout v2.5.0; \
+		cd ../../coredns/coredns; \
+		LIBFUZZER=YES $(MAKE) -f Makefile.fuzz all; \
+		$(MAKE) -sf Makefile.fuzz fuzzit; \
+		for i in `$(MAKE) -sf Makefile.fuzz echo`; do echo $$i; \
+			./fuzzit create job --type $(FUZZIT_TYPE) coredns/$$i ./$$i; \
+		done; \
+	fi;
+endif
 
-.PHONY: clean
-clean:
-	go clean
-	rm -f coredns
-
-core/zmiddleware.go core/dnsserver/zdirectives.go: middleware.cfg
+core/plugin/zplugin.go core/dnsserver/zdirectives.go: plugin.cfg
 	go generate coredns.go
 
 .PHONY: gen
 gen:
 	go generate coredns.go
 
-.PHONY: fmt
-fmt:
-	## run go fmt
-	@test -z "$$(gofmt -s -l . | grep -v vendor/ | tee /dev/stderr)" || \
-		(echo "please format Go code with 'gofmt -s -w'" && false)
+.PHONY: pb
+pb:
+	$(MAKE) -C pb
 
-.PHONY: distclean
-distclean: clean
-	# Clean all dependencies and build artifacts
-	find $(GOPATH)/pkg -maxdepth 1 -mindepth 1 | xargs rm -rf
-	find $(GOPATH)/bin -maxdepth 1 -mindepth 1 | xargs rm -rf
-
-	find $(GOPATH)/src -maxdepth 1 -mindepth 1 | grep -v github | xargs rm -rf
-	find $(GOPATH)/src -maxdepth 2 -mindepth 2 | grep -v miekg | xargs rm -rf
-	find $(GOPATH)/src/github.com/miekg -maxdepth 1 -mindepth 1 \! -name \*coredns\* | xargs rm -rf
+.PHONY: clean
+clean:
+	go clean
+	rm -f coredns

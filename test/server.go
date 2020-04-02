@@ -1,16 +1,13 @@
 package test
 
 import (
-	"io/ioutil"
-	"log"
 	"sync"
 
+	_ "github.com/coredns/coredns/core" // Hook in CoreDNS.
 	"github.com/coredns/coredns/core/dnsserver"
+	_ "github.com/coredns/coredns/core/plugin" // Load all managed plugins in github.com/coredns/coredns.
 
-	// Hook in CoreDNS.
-	_ "github.com/coredns/coredns/core"
-
-	"github.com/mholt/caddy"
+	"github.com/caddyserver/caddy"
 )
 
 var mu sync.Mutex
@@ -21,7 +18,6 @@ func CoreDNSServer(corefile string) (*caddy.Instance, error) {
 	defer mu.Unlock()
 	caddy.Quiet = true
 	dnsserver.Quiet = true
-	log.SetOutput(ioutil.Discard)
 
 	return caddy.Start(NewInput(corefile))
 }
@@ -46,6 +42,17 @@ func CoreDNSServerPorts(i *caddy.Instance, k int) (udp, tcp string) {
 		tcp = t.String()
 	}
 	return
+}
+
+// CoreDNSServerAndPorts combines CoreDNSServer and CoreDNSServerPorts to start a CoreDNS
+// server and returns the udp and tcp ports of the first instance.
+func CoreDNSServerAndPorts(corefile string) (i *caddy.Instance, udp, tcp string, err error) {
+	i, err = CoreDNSServer(corefile)
+	if err != nil {
+		return nil, "", "", err
+	}
+	udp, tcp = CoreDNSServerPorts(i, 0)
+	return i, udp, tcp, nil
 }
 
 // Input implements the caddy.Input interface and acts as an easy way to use a string as a Corefile.

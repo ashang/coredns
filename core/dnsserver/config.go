@@ -1,9 +1,12 @@
 package dnsserver
 
 import (
-	"github.com/coredns/coredns/middleware"
+	"crypto/tls"
+	"fmt"
 
-	"github.com/mholt/caddy"
+	"github.com/coredns/coredns/plugin"
+
+	"github.com/caddyserver/caddy"
 )
 
 // Config configuration for a single server.
@@ -11,52 +14,60 @@ type Config struct {
 	// The zone of the site.
 	Zone string
 
-	// The hostname to bind listener to, defaults to the wildcard address
-	ListenHost string
+	// one or several hostnames to bind the server to.
+	// defaults to a single empty string that denote the wildcard address
+	ListenHosts []string
 
 	// The port to listen on.
 	Port string
 
-	// Root points to a base directory we we find user defined "things".
-	// First consumer is the file middleware to looks for zone files in this place.
+	// Root points to a base directory we find user defined "things".
+	// First consumer is the file plugin to looks for zone files in this place.
 	Root string
 
-	// Server is the server that handles this config
-	Server *Server
+	// Debug controls the panic/recover mechanism that is enabled by default.
+	Debug bool
 
-	// Middleware stack.
-	Middleware []middleware.Middleware
+	// The transport we implement, normally just "dns" over TCP/UDP, but could be
+	// DNS-over-TLS or DNS-over-gRPC.
+	Transport string
 
-	// Compiled middleware stack.
-	middlewareChain middleware.Handler
+	// If this function is not nil it will be used to further filter access
+	// to this handler. The primary use is to limit access to a reverse zone
+	// on a non-octet boundary, i.e. /17
+	FilterFunc func(string) bool
+
+	// TLSConfig when listening for encrypted connections (gRPC, DNS-over-TLS).
+	TLSConfig *tls.Config
+
+	// Plugin stack.
+	Plugin []plugin.Plugin
+
+	// Compiled plugin stack.
+	pluginChain plugin.Handler
+
+	// Plugin interested in announcing that they exist, so other plugin can call methods
+	// on them should register themselves here. The name should be the name as return by the
+	// Handler's Name method.
+	registry map[string]plugin.Handler
+}
+
+// keyForConfig build a key for identifying the configs during setup time
+func keyForConfig(blocIndex int, blocKeyIndex int) string {
+	return fmt.Sprintf("%d:%d", blocIndex, blocKeyIndex)
 }
 
 // GetConfig gets the Config that corresponds to c.
 // If none exist nil is returned.
 func GetConfig(c *caddy.Controller) *Config {
 	ctx := c.Context().(*dnsContext)
-	if cfg, ok := ctx.keysToConfigs[c.Key]; ok {
+	key := keyForConfig(c.ServerBlockIndex, c.ServerBlockKeyIndex)
+	if cfg, ok := ctx.keysToConfigs[key]; ok {
 		return cfg
 	}
 	// we should only get here during tests because directive
 	// actions typically skip the server blocks where we make
 	// the configs.
-	ctx.saveConfig(c.Key, &Config{})
+	ctx.saveConfig(key, &Config{ListenHosts: []string{""}})
 	return GetConfig(c)
-}
-
-// GetMiddleware returns the middleware handler that has been added to the config under name.
-// This is useful to inspect if a certain middleware is active in this server.
-// Note that this is order dependent and the order is defined in directives.go, i.e. if your middleware
-// comes before the middleware you are checking; it will not be there (yet).
-func GetMiddleware(c *caddy.Controller, name string) middleware.Handler {
-	// TODO(miek): calling the handler h(nil) should be a noop...
-	conf := GetConfig(c)
-	for _, h := range conf.Middleware {
-		x := h(nil)
-		if name == x.Name() {
-			return x
-		}
-	}
-	return nil
 }

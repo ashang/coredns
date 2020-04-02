@@ -1,24 +1,18 @@
 package test
 
 import (
-	"io/ioutil"
-	"log"
 	"testing"
-	"time"
 
-	"github.com/coredns/coredns/middleware/proxy"
-	"github.com/coredns/coredns/middleware/test"
-	"github.com/coredns/coredns/request"
+	"github.com/coredns/coredns/plugin/test"
 
 	"github.com/miekg/dns"
 )
 
 func TestLookupCache(t *testing.T) {
-	t.Parallel()
 	// Start auth. CoreDNS holding the auth zone.
 	name, rm, err := test.TempFile(".", exampleOrg)
 	if err != nil {
-		t.Fatalf("failed to created zone: %s", err)
+		t.Fatalf("Failed to create zone: %s", err)
 	}
 	defer rm()
 
@@ -26,63 +20,48 @@ func TestLookupCache(t *testing.T) {
        file ` + name + `
 }
 `
-	i, err := CoreDNSServer(corefile)
+	i, udp, _, err := CoreDNSServerAndPorts(corefile)
 	if err != nil {
 		t.Fatalf("Could not get CoreDNS serving instance: %s", err)
 	}
-
-	udp, _ := CoreDNSServerPorts(i, 0)
-	if udp == "" {
-		t.Fatalf("Could not get UDP listening port")
-	}
 	defer i.Stop()
 
-	// Start caching proxy CoreDNS that we want to test.
+	// Start caching forward CoreDNS that we want to test.
 	corefile = `example.org:0 {
-	proxy . ` + udp + `
-	cache
+	forward . ` + udp + `
+	cache 10
 }
 `
-	i, err = CoreDNSServer(corefile)
+	i, udp, _, err = CoreDNSServerAndPorts(corefile)
 	if err != nil {
 		t.Fatalf("Could not get CoreDNS serving instance: %s", err)
 	}
-
-	udp, _ = CoreDNSServerPorts(i, 0)
-	if udp == "" {
-		t.Fatalf("Could not get UDP listening port")
-	}
 	defer i.Stop()
 
-	log.SetOutput(ioutil.Discard)
+	t.Run("Long TTL", func(t *testing.T) {
+		testCase(t, "example.org.", udp, 2, 10)
+	})
 
-	p := proxy.NewLookup([]string{udp})
-	state := request.Request{W: &test.ResponseWriter{}, Req: new(dns.Msg)}
+	t.Run("Short TTL", func(t *testing.T) {
+		testCase(t, "short.example.org.", udp, 1, 5)
+	})
 
-	resp, err := p.Lookup(state, "example.org.", dns.TypeA)
+}
+
+func testCase(t *testing.T, name, addr string, expectAnsLen int, expectTTL uint32) {
+	m := new(dns.Msg)
+	m.SetQuestion(name, dns.TypeA)
+	resp, err := dns.Exchange(m, addr)
 	if err != nil {
 		t.Fatal("Expected to receive reply, but didn't")
 	}
-	// expect answer section with A record in it
-	if len(resp.Answer) == 0 {
-		t.Fatal("Expected to at least one RR in the answer section, got none")
+
+	if len(resp.Answer) != expectAnsLen {
+		t.Fatalf("Expected %v RR in the answer section, got %v.", expectAnsLen, len(resp.Answer))
 	}
 
 	ttl := resp.Answer[0].Header().Ttl
-
-	time.Sleep(2 * time.Second) // TODO(miek): meh.
-
-	resp, err = p.Lookup(state, "example.org.", dns.TypeA)
-	if err != nil {
-		t.Fatal("Expected to receive reply, but didn't")
-	}
-
-	// expect answer section with A record in it
-	if len(resp.Answer) == 0 {
-		t.Error("Expected to at least one RR in the answer section, got none")
-	}
-	newTTL := resp.Answer[0].Header().Ttl
-	if newTTL >= ttl {
-		t.Errorf("Expected TTL to be lower than: %d, got %d", ttl, newTTL)
+	if ttl != expectTTL {
+		t.Errorf("Expected TTL to be %d, got %d", expectTTL, ttl)
 	}
 }

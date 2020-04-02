@@ -1,19 +1,14 @@
 package test
 
 import (
-	"io/ioutil"
-	"log"
-	"sort"
 	"testing"
 
-	"github.com/coredns/coredns/middleware/proxy"
-	mtest "github.com/coredns/coredns/middleware/test"
-	"github.com/coredns/coredns/request"
+	mtest "github.com/coredns/coredns/plugin/test"
 
 	"github.com/miekg/dns"
 )
 
-// Using miek.nl here because this is the easiest zone to get access to and it's masters
+// Using miek.nl here because this is the easiest zone to get access to and its masters
 // run both NSD and BIND9, making checks like "what should we actually return" super easy.
 var dsTestCases = []mtest.Case{
 	{
@@ -33,9 +28,9 @@ var dsTestCases = []mtest.Case{
 
 func TestLookupDS(t *testing.T) {
 	t.Parallel()
-	name, rm, err := TempFile(".", miekNL)
+	name, rm, err := mtest.TempFile(".", miekNL)
 	if err != nil {
-		t.Fatalf("failed to created zone: %s", err)
+		t.Fatalf("Failed to create zone: %s", err)
 	}
 	defer rm()
 
@@ -44,44 +39,22 @@ func TestLookupDS(t *testing.T) {
 }
 `
 
-	i, err := CoreDNSServer(corefile)
+	i, udp, _, err := CoreDNSServerAndPorts(corefile)
 	if err != nil {
 		t.Fatalf("Could not get CoreDNS serving instance: %s", err)
 	}
-
-	udp, _ := CoreDNSServerPorts(i, 0)
-	if udp == "" {
-		t.Fatalf("Could not get UDP listening port")
-	}
 	defer i.Stop()
 
-	log.SetOutput(ioutil.Discard)
-
-	p := proxy.NewLookup([]string{udp})
-	state := request.Request{W: &mtest.ResponseWriter{}, Req: new(dns.Msg)}
-
 	for _, tc := range dsTestCases {
-		resp, err := p.Lookup(state, tc.Qname, tc.Qtype)
+		m := new(dns.Msg)
+		m.SetQuestion(tc.Qname, tc.Qtype)
+		resp, err := dns.Exchange(m, udp)
 		if err != nil || resp == nil {
 			t.Fatalf("Expected to receive reply, but didn't for %s %d", tc.Qname, tc.Qtype)
 		}
 
-		sort.Sort(mtest.RRSet(resp.Answer))
-		sort.Sort(mtest.RRSet(resp.Ns))
-		sort.Sort(mtest.RRSet(resp.Extra))
-
-		if !mtest.Header(t, tc, resp) {
-			t.Logf("%v\n", resp)
-			continue
-		}
-		if !mtest.Section(t, tc, mtest.Answer, resp.Answer) {
-			t.Logf("%v\n", resp)
-		}
-		if !mtest.Section(t, tc, mtest.Ns, resp.Ns) {
-			t.Logf("%v\n", resp)
-		}
-		if !mtest.Section(t, tc, mtest.Extra, resp.Extra) {
-			t.Logf("%v\n", resp)
+		if err := mtest.SortAndCheck(resp, tc); err != nil {
+			t.Error(err)
 		}
 	}
 }

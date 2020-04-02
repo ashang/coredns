@@ -1,8 +1,11 @@
-FROM alpine:latest
-MAINTAINER Miek Gieben <miek@miek.nl> @miekg
+FROM debian:stable-slim
 
-RUN apk --update add bind-tools && rm -rf /var/cache/apk/*
+RUN apt-get update && apt-get -uy upgrade
+RUN apt-get -y install ca-certificates && update-ca-certificates
 
+FROM scratch
+
+COPY --from=0 /etc/ssl/certs /etc/ssl/certs
 ADD coredns /coredns
 
 EXPOSE 53 53/udp
